@@ -1,0 +1,129 @@
+name: بناء APK الإصدار
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+  ANDROID_NDK_HOME: ${{ github.workspace }}/android-ndk
+  JAVA_HOME: /usr/lib/jvm/java-11-openjdk-amd64
+
+jobs:
+  بناء-apk:
+    runs-on: ubuntu-20.04
+    timeout-minutes: 480
+
+    steps:
+      - name: فحص الكود
+        uses: actions/checkout@v3
+
+      - name: إعداد JDK 11
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+
+      - name: إعداد Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: تثبيت Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-android,x86_64-linux-android
+
+      - name: تثبيت cargo-ndk
+        run: cargo install cargo-ndk
+
+      - name: تثبيت الأدوات النظامية
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang libc6-dev \
+            libxrandr-dev libglu1-mesa-dev \
+            ninja-build \
+            python3 python3-pip
+
+      - name: تنزيل SDK و NDK
+        run: |
+          mkdir -p ${{ env.ANDROID_SDK_ROOT }}
+          cd ${{ env.ANDROID_SDK_ROOT }}
+          
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip
+          unzip -q commandlinetools-linux-9477386_latest.zip
+          rm commandlinetools-linux-9477386_latest.zip
+          
+          ${{ env.ANDROID_SDK_ROOT }}/cmdline-tools/cmdline-tools/bin/sdkmanager --sdk_root=${{ env.ANDROID_SDK_ROOT }} \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;27.0.12077973"
+
+      - name: تثبيت depot_tools
+        run: |
+          cd ${{ github.workspace }}
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          export PATH=${{ github.workspace }}/depot_tools:$PATH
+
+      - name: تنزيل مصدر Brave
+        run: |
+          export PATH=${{ github.workspace }}/depot_tools:$PATH
+          mkdir -p ${{ github.workspace }}/brave-src
+          cd ${{ github.workspace }}/brave-src
+          
+          git clone https://github.com/brave/brave-browser.git src
+          cd src
+          npm install
+          npm run sync -- --nohooks
+        timeout-minutes: 60
+
+      - name: تشغيل hooks
+        run: |
+          export PATH=${{ github.workspace }}/depot_tools:$PATH
+          cd ${{ github.workspace }}/brave-src/src
+          gclient runhooks
+
+      - name: إنشاء ملف التكوين GN
+        run: |
+          cd ${{ github.workspace }}/brave-src/src
+          gn gen out/Release --args='
+          target_os="android"
+          target_cpu="arm64"
+          is_debug=false
+          proprietary_codecs=true
+          ffmpeg_branding="Chrome"
+          enable_websockets=true
+          enable_media_stream=true
+          '
+
+      - name: بناء APK
+        run: |
+          export PATH=${{ github.workspace }}/depot_tools:$PATH
+          cd ${{ github.workspace }}/brave-src/src
+          ninja -C out/Release -j4 chrome_public_apk
+        timeout-minutes: 300
+
+      - name: نسخ APK
+        run: |
+          cd ${{ github.workspace }}/brave-src/src
+          if [ -f "out/Release/apks/ChromePublic.apk" ]; then
+            cp out/Release/apks/ChromePublic.apk ${{ github.workspace }}/Nnads-1.0.0.apk
+            echo "✅ تم البناء بنجاح"
+          else
+            echo "❌ فشل البناء"
+            exit 1
+          fi
+
+      - name: حساب SHA-256
+        run: |
+          cd ${{ github.workspace }}
+          sha256sum Nnads-1.0.0.apk > CHECKSUMS.txt
+
+      - name: رفع الملف
+        uses: actions/upload-artifact@v3
+        with:
+          name: Nnads-APK
+          path: Nnads-1.0.0.apk
